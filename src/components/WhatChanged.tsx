@@ -197,7 +197,7 @@ export const WhatChanged: React.FC<WhatChangedProps> = ({
           <div className="space-y-1 max-w-lg mx-auto">
             <h2 className="text-base font-bold text-slate-200">Discover How Your Thoughts Have Shifted</h2>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Gemini Vault will chronologically contrast your earliest journal entries with your latest entries, highlighting
+              ReflectAI will chronologically contrast your earliest journal entries with your latest entries, highlighting
               tangible changes in your decision-making, daily focus, and personal philosophy with direct quotes.
             </p>
           </div>

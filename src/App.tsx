@@ -283,7 +283,7 @@ export default function App() {
       <div className="min-h-screen bg-[#020617] flex items-center justify-center">
         <div className="text-center space-y-3">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 animate-pulse mx-auto shadow-lg shadow-cyan-950/50" />
-          <p className="font-serif text-sm font-medium text-slate-400">Initializing Gemini Vault...</p>
+          <p className="font-serif text-sm font-medium text-slate-400">Initializing ReflectAI...</p>
         </div>
       </div>
     );

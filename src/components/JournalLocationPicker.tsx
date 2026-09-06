@@ -10,7 +10,7 @@ import {
   ChevronUp,
   Globe,
 } from 'lucide-react';
-import { APIProvider, Map, AdvancedMarker, InfoWindow } from '@vis.gl/react-google-maps';
+import { APIProvider, Map, AdvancedMarker, Marker, InfoWindow } from '@vis.gl/react-google-maps';
 import { MapErrorBoundary } from './MapErrorBoundary';
 
 interface JournalLocationPickerProps {
@@ -87,6 +87,9 @@ export const JournalLocationPicker: React.FC<JournalLocationPickerProps> = ({
   const [showInfoWindow, setShowInfoWindow] = useState(true);
 
   const googleMapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+  const configuredMapId = import.meta.env.VITE_GOOGLE_MAPS_MAP_ID || '';
+  // Cloud Map ID to use for AdvancedMarker. If not provided, fallback to standard map + pin or DEMO_MAP_ID
+  const mapId = configuredMapId.trim() || undefined;
 
   const handleSelectPreset = (preset: (typeof PRESET_PLACES)[0]) => {
     onChange({
@@ -236,7 +239,8 @@ export const JournalLocationPicker: React.FC<JournalLocationPickerProps> = ({
                 {googleMapsApiKey ? (
                   <APIProvider apiKey={googleMapsApiKey} libraries={['marker']}>
                     <Map
-                      mapId="DEMO_MAP_ID"
+                      internalUsageAttributionIds={['gmp_git_agentskills_v1']}
+                      {...(mapId ? { mapId } : {})}
                       defaultCenter={{ lat: location.latitude, lng: location.longitude }}
                       center={{ lat: location.latitude, lng: location.longitude }}
                       defaultZoom={13}
@@ -244,17 +248,25 @@ export const JournalLocationPicker: React.FC<JournalLocationPickerProps> = ({
                       disableDefaultUI={false}
                       className="w-full h-full"
                     >
-                      <AdvancedMarker
-                        position={{ lat: location.latitude, lng: location.longitude }}
-                        onClick={() => setShowInfoWindow(!showInfoWindow)}
-                      >
-                        <div className="relative group cursor-pointer flex flex-col items-center">
-                          <div className="p-1.5 rounded-full bg-cyan-500 text-slate-950 shadow-lg shadow-cyan-500/50 border-2 border-slate-900 hover:scale-110 transition-transform">
-                            <MapPin className="w-4 h-4 fill-slate-950 text-slate-950" />
+                      {mapId ? (
+                        <AdvancedMarker
+                          position={{ lat: location.latitude, lng: location.longitude }}
+                          onClick={() => setShowInfoWindow(!showInfoWindow)}
+                        >
+                          <div className="relative group cursor-pointer flex flex-col items-center">
+                            <div className="p-1.5 rounded-full bg-cyan-500 text-slate-950 shadow-lg shadow-cyan-500/50 border-2 border-slate-900 hover:scale-110 transition-transform">
+                              <MapPin className="w-4 h-4 fill-slate-950 text-slate-950" />
+                            </div>
+                            <div className="w-1.5 h-1.5 bg-cyan-500 rotate-45 -mt-0.5 shadow-sm" />
                           </div>
-                          <div className="w-1.5 h-1.5 bg-cyan-500 rotate-45 -mt-0.5 shadow-sm" />
-                        </div>
-                      </AdvancedMarker>
+                        </AdvancedMarker>
+                      ) : (
+                        <Marker
+                          position={{ lat: location.latitude, lng: location.longitude }}
+                          onClick={() => setShowInfoWindow(!showInfoWindow)}
+                          title={location.displayName}
+                        />
+                      )}
 
                       {showInfoWindow && (
                         <InfoWindow

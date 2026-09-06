@@ -208,7 +208,7 @@ export const MemoriesView: React.FC<MemoriesViewProps> = ({
             </span>
           </div>
           <p className="text-sm text-slate-400">
-            Enduring personal convictions, goals, habits, and key milestones that help Gemini Vault learn how your thinking evolves.
+            Enduring personal convictions, goals, habits, and key milestones that help ReflectAI learn how your thinking evolves.
           </p>
         </div>
 
@@ -400,7 +400,7 @@ export const MemoriesView: React.FC<MemoriesViewProps> = ({
             <p className="text-xs text-slate-500 max-w-sm mx-auto">
               {searchQuery
                 ? 'Try broadening your search query or reset category filters.'
-                : 'Capture core values, goals, and reflections to give Gemini Vault persistent context across your thinking sessions.'}
+                : 'Capture core values, goals, and reflections to give ReflectAI persistent context across your thinking sessions.'}
             </p>
           </div>
           {!searchQuery && !isAddingNew && (

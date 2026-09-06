@@ -1,8 +1,8 @@
-# Gemini Vault
+# ReflectAI
 
 > **"Your private AI thinking space that learns how your thinking evolves."**
 
-Gemini Vault is a secure, authenticated, AI-powered personal reflection platform built as a submission for the **Google Cloud Run AI Challenge**. It pairs high-empathy multi-turn reflective inquiry with durable personal memory, location context via Google Maps Platform, longitudinal shift analysis ("What Changed?"), and grounded semantic inquiry ("Ask My Journal") — designed strictly for authenticated user data isolation with zero cross-user leakage.
+ReflectAI is a secure, authenticated, AI-powered personal reflection platform built as a submission for the **Google Cloud Run AI Challenge**. It pairs high-empathy multi-turn reflective inquiry with durable personal memory, location context via Google Maps Platform, longitudinal shift analysis ("What Changed?"), and grounded semantic inquiry ("Ask My Journal") — designed strictly for authenticated user data isolation with zero cross-user leakage.
 
 ---
 

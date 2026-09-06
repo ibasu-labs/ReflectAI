@@ -1,5 +1,5 @@
 {
-  "name": "Gemini Vault",
+  "name": "ReflectAI",
   "description": "Your private AI thinking space that learns how your thinking evolves. Secure, authenticated personal journal with Cloud Firestore, Gemini 3.6 Flash, Google Maps, and Secret Manager.",
   "requestFramePermissions": [
     "geolocation"

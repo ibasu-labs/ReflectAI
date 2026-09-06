@@ -43,10 +43,10 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center space-x-3">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-white shadow-md shadow-cyan-950/50 font-bold text-lg">
-              G
+              R
             </div>
             <div>
-              <span className="font-serif text-xl font-bold tracking-tight text-slate-100">Gemini Vault</span>
+              <span className="font-serif text-xl font-bold tracking-tight text-slate-100">ReflectAI</span>
               <span className="ml-2 text-xs uppercase tracking-wider text-cyan-400 font-semibold bg-cyan-950/60 px-2 py-0.5 rounded-full border border-cyan-800/50">
                 Gemini 3.6 Flash
               </span>

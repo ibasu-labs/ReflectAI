@@ -1,9 +1,11 @@
 {
   "projectId": "reflectaiideathon",
-  "appId": "1:476144168572:web:49250ab8935fc7bf2ee3f9",
+  "appId": "1:476144168572:web:3c89733d83e389d02ee3f9",
   "apiKey": "AIzaSyAQBeB4XmE1cixmrdtX3O6MM9A9VvbaHr8",
   "authDomain": "reflectaiideathon.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
   "storageBucket": "reflectaiideathon.firebasestorage.app",
   "messagingSenderId": "476144168572",
-  "firestoreDatabaseId": "(default)"
+  "measurementId": "",
+  "recaptchaSiteKey": ""
 }

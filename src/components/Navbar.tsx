@@ -52,14 +52,14 @@ export const Navbar: React.FC<NavbarProps> = ({
           <button
             onClick={() => onSelectTab('journal')}
             className="flex items-center space-x-2.5 text-left group focus:outline-hidden cursor-pointer"
-            title="Gemini Vault - Your private AI thinking space"
+            title="ReflectAI - Your private AI thinking space"
           >
             <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-white font-bold text-lg shadow-md shadow-cyan-950/50 group-hover:from-cyan-400 group-hover:to-blue-500 transition-all">
-              G
+              R
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <span className="font-serif text-lg font-bold text-slate-100 leading-tight">Gemini Vault</span>
+                <span className="font-serif text-lg font-bold text-slate-100 leading-tight">ReflectAI</span>
                 <span className="text-[10px] uppercase font-bold tracking-wider px-1.5 py-0.2 rounded-sm bg-cyan-950/80 text-cyan-300 border border-cyan-800/60 hidden sm:inline">
                   3.6 Flash
                 </span>
