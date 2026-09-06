@@ -16,6 +16,7 @@ import {
   setDoc,
   getDocs,
   getDoc,
+  getDocFromServer,
   deleteDoc,
   query,
   orderBy,
@@ -24,17 +25,68 @@ import {
   Firestore,
   Unsubscribe,
 } from 'firebase/firestore';
+import appletConfig from '../../firebase-applet-config.json';
 import { JournalInteraction, UserProfile, UserMemory, AskJournalResponse } from '../types';
 import { stripUndefined } from './sanitizer';
 
-// Environment variable credentials
+// Standard Firestore Error Diagnostic Interfaces per Firebase Skill Specification
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  };
+}
+
+export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth?.currentUser?.uid || null,
+      email: auth?.currentUser?.email || null,
+      emailVerified: auth?.currentUser?.emailVerified || null,
+      isAnonymous: auth?.currentUser?.isAnonymous || null,
+      tenantId: auth?.currentUser?.tenantId || null,
+      providerInfo:
+        auth?.currentUser?.providerData?.map((provider) => ({
+          providerId: provider.providerId,
+          email: provider.email,
+        })) || [],
+    },
+    operationType,
+    path,
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
+// Credentials from applet config with environment variable fallbacks
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || '',
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '',
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || '',
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || '',
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || '',
+  apiKey: appletConfig.apiKey || import.meta.env.VITE_FIREBASE_API_KEY || '',
+  authDomain: appletConfig.authDomain || import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '',
+  projectId: appletConfig.projectId || import.meta.env.VITE_FIREBASE_PROJECT_ID || '',
+  storageBucket: appletConfig.storageBucket || import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || '',
+  messagingSenderId: appletConfig.messagingSenderId || import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
+  appId: appletConfig.appId || import.meta.env.VITE_FIREBASE_APP_ID || '',
+  firestoreDatabaseId: appletConfig.firestoreDatabaseId || '(default)',
 };
 
 export const isFirebaseConfigured = Boolean(
@@ -49,14 +101,18 @@ if (isFirebaseConfigured) {
   try {
     app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
     auth = getAuth(app);
-    db = getFirestore(app);
+    // Explicitly bind databaseId per Firebase Skill
+    db = getFirestore(app, firebaseConfig.firestoreDatabaseId || '(default)');
   } catch (err) {
     console.warn('Firebase initialization warning:', err);
   }
 }
 
-// Local mock storage for offline / quick demo preview mode
+export { auth, db };
+
+// Local cache keys (used only as secondary client cache, never to replace Firestore)
 const LOCAL_STORAGE_KEY_PREFIX = 'reflectai_user_data_';
+const LOCAL_STORAGE_MEMORIES_PREFIX = 'reflectai_user_memories_';
 const LOCAL_USER_SESSION_KEY = 'reflectai_active_user';
 
 function getLocalUserInteractions(userId: string): JournalInteraction[] {
@@ -80,73 +136,79 @@ function saveLocalUserInteractions(userId: string, data: JournalInteraction[]): 
 }
 
 export async function loginWithGoogle(): Promise<UserProfile> {
-  if (auth && isFirebaseConfigured) {
-    try {
-      const provider = new GoogleAuthProvider();
-      provider.setCustomParameters({ prompt: 'select_account' });
-      const result = await signInWithPopup(auth, provider);
-      const user = result.user;
-      return {
-        uid: user.uid,
-        email: user.email,
-        displayName: user.displayName || 'Reflective Writer',
-        photoURL: user.photoURL,
-      };
-    } catch (firebaseErr: any) {
-      console.warn(
-        'Firebase popup sign-in encountered an issue:',
-        firebaseErr?.code || firebaseErr?.message || firebaseErr
-      );
-      
-      // If user closed the popup intentionally
-      if (firebaseErr?.code === 'auth/popup-closed-by-user' || firebaseErr?.code === 'auth/cancelled-popup-request') {
-        throw new Error('Sign-in was cancelled. Please try again.');
-      }
-      
-      // If popup was blocked by browser iframe / security policy
-      if (firebaseErr?.code === 'auth/popup-blocked' || firebaseErr?.message?.includes('popup-blocked')) {
-        const err: any = new Error('The Google Sign-In popup was blocked by your browser. Please allow popups or open the app in a new tab.');
-        err.authCode = 'popup-blocked';
-        throw err;
-      }
-
-      // If configuration or authorization domain is missing, throw specific error with domain
-      if (firebaseErr?.code === 'auth/unauthorized-domain') {
-        const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'current domain';
-        const err: any = new Error(`Domain not authorized: "${currentHost}" is not added to Firebase Authorized Domains. Add it in Firebase Console > Authentication > Settings > Authorized domains.`);
-        err.authCode = 'unauthorized-domain';
-        err.domain = currentHost;
-        throw err;
-      }
-
-      if (firebaseErr?.code === 'auth/configuration-not-found') {
-        const err: any = new Error('Google Sign-In provider is not enabled in Firebase Console. Please enable Google in Firebase Console > Authentication > Sign-in method.');
-        err.authCode = 'configuration-not-found';
-        throw err;
-      }
-      
-      // Automatic fallback for unexpected errors in offline/preview environments
-      console.info('Switching to local authenticated session for preview mode.');
-      const fallbackUser: UserProfile = {
-        uid: 'user_' + Math.random().toString(36).substring(2, 9),
-        email: 'guest@reflectai.app',
-        displayName: 'Guest Writer',
-        photoURL: undefined,
-        isAnonymous: true,
-      };
-      localStorage.setItem(LOCAL_USER_SESSION_KEY, JSON.stringify(fallbackUser));
-      return fallbackUser;
-    }
+  if (!auth || !isFirebaseConfigured) {
+    throw new Error('Firebase configuration is missing or incomplete.');
   }
 
-  return loginAsGuest();
+  try {
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    const result = await signInWithPopup(auth, provider);
+    const user = result.user;
+    localStorage.removeItem(LOCAL_USER_SESSION_KEY);
+    return {
+      uid: user.uid,
+      email: user.email,
+      displayName: user.displayName || 'Reflective Writer',
+      photoURL: user.photoURL,
+    };
+  } catch (firebaseErr: any) {
+    console.warn(
+      'Firebase popup sign-in encountered an issue:',
+      firebaseErr?.code || firebaseErr?.message || firebaseErr
+    );
+
+    // If user closed the popup intentionally
+    if (
+      firebaseErr?.code === 'auth/popup-closed-by-user' ||
+      firebaseErr?.code === 'auth/cancelled-popup-request'
+    ) {
+      throw new Error('Sign-in was cancelled. Please try again.');
+    }
+
+    // If popup was blocked by browser iframe / security policy
+    if (
+      firebaseErr?.code === 'auth/popup-blocked' ||
+      firebaseErr?.message?.includes('popup-blocked')
+    ) {
+      const err: any = new Error(
+        'The Google Sign-In popup was blocked by your browser or the preview iframe. Please allow popups or open the app in a new tab to authenticate.'
+      );
+      err.authCode = 'popup-blocked';
+      throw err;
+    }
+
+    // If unauthorized domain
+    if (firebaseErr?.code === 'auth/unauthorized-domain') {
+      const currentHost =
+        typeof window !== 'undefined' ? window.location.hostname : 'current domain';
+      const err: any = new Error(
+        `Domain not authorized: "${currentHost}" is not added to Firebase Authorized Domains. Add it in Firebase Console > Authentication > Settings > Authorized domains.`
+      );
+      err.authCode = 'unauthorized-domain';
+      err.domain = currentHost;
+      throw err;
+    }
+
+    if (firebaseErr?.code === 'auth/configuration-not-found') {
+      const err: any = new Error(
+        'Google Sign-In provider is not enabled in Firebase Console. Please enable Google in Firebase Console > Authentication > Sign-in method.'
+      );
+      err.authCode = 'configuration-not-found';
+      throw err;
+    }
+
+    throw new Error(
+      firebaseErr?.message || 'Failed to authenticate with Google Firebase Authentication.'
+    );
+  }
 }
 
 export function loginAsGuest(): UserProfile {
   const guestUser: UserProfile = {
-    uid: 'guest_' + Math.random().toString(36).substring(2, 8),
-    email: 'guest@reflectai.app',
-    displayName: 'Guest Writer',
+    uid: 'local_guest_' + Math.random().toString(36).substring(2, 8),
+    email: 'guest@reflectai.local',
+    displayName: 'Guest Writer (Local Only)',
     photoURL: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
     isAnonymous: true,
   };
@@ -169,14 +231,17 @@ export function subscribeToAuth(callback: (user: UserProfile | null) => void): (
   if (auth && isFirebaseConfigured) {
     return firebaseOnAuthStateChanged(auth, (user: User | null) => {
       if (user) {
+        // Clear any stale local guest session once real Firebase user signs in
+        localStorage.removeItem(LOCAL_USER_SESSION_KEY);
         callback({
           uid: user.uid,
           email: user.email,
           displayName: user.displayName || 'Reflective Writer',
           photoURL: user.photoURL,
+          isAnonymous: user.isAnonymous,
         });
       } else {
-        // Check if a local guest session is active
+        // Check if an explicit local guest session is active
         try {
           const saved = localStorage.getItem(LOCAL_USER_SESSION_KEY);
           if (saved) {
@@ -191,7 +256,7 @@ export function subscribeToAuth(callback: (user: UserProfile | null) => void): (
     });
   }
 
-  // Local state check
+  // Fallback if Firebase is not configured
   try {
     const saved = localStorage.getItem(LOCAL_USER_SESSION_KEY);
     if (saved) {
@@ -207,62 +272,114 @@ export function subscribeToAuth(callback: (user: UserProfile | null) => void): (
 
 /**
  * Saves a journal interaction strictly under /users/{userId}/interactions/{interactionId}
+ * Requires active Firebase Authentication session matching the target userId.
  * Strips all undefined fields to enforce Zero-Crash Payload Hygiene.
  */
 export async function saveJournalInteraction(
   userId: string,
   interaction: JournalInteraction
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; errorCode?: string }> {
   if (!userId) {
     return { success: false, error: 'User must be authenticated to save reflections.' };
   }
 
   const cleanPayload = stripUndefined(interaction);
 
+  // Guarantee Firebase Auth is fully initialized before verifying credentials
+  if (auth) {
+    await auth.authStateReady();
+  }
+
+  // Verify Firebase Auth state
+  if (!auth || !auth.currentUser) {
+    // Keep local backup so user input is never lost in editor
+    const existing = getLocalUserInteractions(userId);
+    const filtered = existing.filter((item) => item.id !== cleanPayload.id);
+    saveLocalUserInteractions(userId, [cleanPayload, ...filtered]);
+
+    return {
+      success: false,
+      error: 'Firebase Authentication required: Sign In with Google to sync documents to Cloud Firestore.',
+      errorCode: 'unauthenticated',
+    };
+  }
+
+  // Security check: Active Firebase UID must match the target document path
+  if (auth.currentUser.uid !== userId) {
+    return {
+      success: false,
+      error: 'Security Error: Active Firebase UID does not match document owner.',
+      errorCode: 'permission-denied',
+    };
+  }
+
   if (db && isFirebaseConfigured) {
     try {
       const interactionRef = doc(db, 'users', userId, 'interactions', cleanPayload.id);
       await setDoc(interactionRef, cleanPayload, { merge: true });
-      return { success: true };
-    } catch (err: any) {
-      console.error('Firestore save failed:', err);
-      // Save locally as fallback so user work is NEVER lost
+
+      // Keep local cache in sync with confirmed Firestore write
       const existing = getLocalUserInteractions(userId);
       const filtered = existing.filter((item) => item.id !== cleanPayload.id);
       saveLocalUserInteractions(userId, [cleanPayload, ...filtered]);
+
+      return { success: true };
+    } catch (err: any) {
+      console.error('[Firestore write error /users/' + userId + '/interactions/' + cleanPayload.id + ']:', err);
+
+      // Cache locally so active work in workspace is preserved
+      const existing = getLocalUserInteractions(userId);
+      const filtered = existing.filter((item) => item.id !== cleanPayload.id);
+      saveLocalUserInteractions(userId, [cleanPayload, ...filtered]);
+
+      const code = err?.code || 'error';
+      const msg = err?.message || 'Database write error';
+      try {
+        handleFirestoreError(err, OperationType.WRITE, `users/${userId}/interactions/${cleanPayload.id}`);
+      } catch {
+        // Logged conforming to FirestoreErrorInfo
+      }
       return {
         success: false,
-        error: `Cloud Firestore sync notice: ${err?.message || 'Database write error'}. Your work is safely cached locally!`,
+        error: `Cloud Firestore error (${code}): ${msg}. Ensure firestore.rules are deployed in Firebase Console.`,
+        errorCode: code,
       };
     }
   }
 
-  // Local storage persistence
-  const existing = getLocalUserInteractions(userId);
-  const filtered = existing.filter((item) => item.id !== cleanPayload.id);
-  saveLocalUserInteractions(userId, [cleanPayload, ...filtered]);
-  return { success: true };
+  return {
+    success: false,
+    error: 'Cloud Firestore is not configured or unavailable.',
+    errorCode: 'not-configured',
+  };
 }
 
 /**
- * Retrieves all reflections for a given user.
+ * Retrieves all reflections for a given authenticated user from Firestore.
  */
 export async function fetchUserInteractions(userId: string): Promise<JournalInteraction[]> {
   if (!userId) return [];
 
-  if (db && isFirebaseConfigured) {
+  if (auth) {
+    await auth.authStateReady();
+  }
+
+  // If authenticated with Firebase, read directly from Cloud Firestore
+  if (auth && auth.currentUser && auth.currentUser.uid === userId && db && isFirebaseConfigured) {
     try {
       const collRef = collection(db, 'users', userId, 'interactions');
-      const q = query(collRef, orderBy('createdAt', 'desc'));
-      const snapshot = await getDocs(q);
+      const snapshot = await getDocs(collRef);
       const list: JournalInteraction[] = [];
       snapshot.forEach((d) => {
         list.push(d.data() as JournalInteraction);
       });
+      list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      // Update local cache with source of truth from Firestore
+      saveLocalUserInteractions(userId, list);
       return list;
-    } catch (err) {
-      console.warn('Firestore fetch error, reading local cache:', err);
-      return getLocalUserInteractions(userId);
+    } catch (err: any) {
+      console.error('[Firestore fetchUserInteractions error]:', err);
+      throw err;
     }
   }
 
@@ -270,54 +387,90 @@ export async function fetchUserInteractions(userId: string): Promise<JournalInte
 }
 
 /**
- * Subscribes to real-time interaction updates for the active user.
+ * Subscribes to real-time interaction updates for the active user from Firestore.
  */
 export function subscribeToUserInteractions(
   userId: string,
-  onUpdate: (interactions: JournalInteraction[]) => void
+  onUpdate: (interactions: JournalInteraction[]) => void,
+  onError?: (err: any) => void
 ): () => void {
   if (!userId) {
     onUpdate([]);
     return () => {};
   }
 
-  if (db && isFirebaseConfigured) {
-    try {
-      const collRef = collection(db, 'users', userId, 'interactions');
-      const q = query(collRef, orderBy('createdAt', 'desc'));
-      const unsub = onSnapshot(
-        q,
-        (snapshot) => {
-          const list: JournalInteraction[] = [];
-          snapshot.forEach((docSnap) => {
-            list.push(docSnap.data() as JournalInteraction);
-          });
-          onUpdate(list);
-        },
-        (error) => {
-          console.warn('Firestore listener error, using local fallback:', error);
-          onUpdate(getLocalUserInteractions(userId));
+  let active = true;
+  let unsubFirestore: (() => void) | null = null;
+
+  // Immediately surface local cache so UI is populated without delay
+  onUpdate(getLocalUserInteractions(userId));
+
+  // If Firebase is configured, verify auth state is fully initialized before attaching listener
+  if (auth && db && isFirebaseConfigured) {
+    auth.authStateReady().then(() => {
+      if (!active) return;
+      if (!auth.currentUser || auth.currentUser.uid !== userId) {
+        // Unauthenticated or UID mismatch: do not query Cloud Firestore (fail closed)
+        return;
+      }
+
+      try {
+        const collRef = collection(db, 'users', userId, 'interactions');
+        unsubFirestore = onSnapshot(
+          collRef,
+          (snapshot) => {
+            if (!active) return;
+            const list: JournalInteraction[] = [];
+            snapshot.forEach((docSnap) => {
+              list.push(docSnap.data() as JournalInteraction);
+            });
+            list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+            saveLocalUserInteractions(userId, list);
+            onUpdate(list);
+          },
+          (error) => {
+            console.error('[Firestore onSnapshot error on /users/' + userId + '/interactions]:', error);
+            if (onError) {
+              onError(error);
+            }
+            // Surface cached data on error so UI remains operable
+            if (active) {
+              onUpdate(getLocalUserInteractions(userId));
+            }
+            try {
+              handleFirestoreError(error, OperationType.GET, `users/${userId}/interactions`);
+            } catch (diagnosticErr) {
+              // Error formatted and logged as FirestoreErrorInfo
+            }
+          }
+        );
+      } catch (err) {
+        console.error('Could not establish Firestore subscription:', err);
+        if (onError) {
+          onError(err);
         }
-      );
-      return unsub;
-    } catch (err) {
-      console.warn('Could not establish Firestore subscription:', err);
-    }
+      }
+    });
   }
 
-  // Local polling listener
-  onUpdate(getLocalUserInteractions(userId));
   const handler = () => {
-    onUpdate(getLocalUserInteractions(userId));
+    if (active) {
+      onUpdate(getLocalUserInteractions(userId));
+    }
   };
   window.addEventListener('storage', handler);
+
   return () => {
+    active = false;
+    if (unsubFirestore) {
+      unsubFirestore();
+    }
     window.removeEventListener('storage', handler);
   };
 }
 
 /**
- * Deletes an interaction from user's isolated document collection.
+ * Deletes an interaction from user's isolated document collection in Firestore.
  */
 export async function deleteJournalInteraction(
   userId: string,
@@ -327,12 +480,24 @@ export async function deleteJournalInteraction(
     return { success: false, error: 'Invalid parameters for deletion' };
   }
 
-  if (db && isFirebaseConfigured) {
+  if (auth) {
+    await auth.authStateReady();
+  }
+
+  if (auth && auth.currentUser && auth.currentUser.uid === userId && db && isFirebaseConfigured) {
     try {
       const docRef = doc(db, 'users', userId, 'interactions', interactionId);
       await deleteDoc(docRef);
+      const existing = getLocalUserInteractions(userId);
+      const filtered = existing.filter((item) => item.id !== interactionId);
+      saveLocalUserInteractions(userId, filtered);
+      return { success: true };
     } catch (err: any) {
-      console.warn('Firestore delete error, cleaning local cache:', err);
+      console.error('[Firestore delete error]:', err);
+      return {
+        success: false,
+        error: `Firestore delete error: ${err?.message || 'Failed to delete from Firestore'}`,
+      };
     }
   }
 
@@ -345,7 +510,6 @@ export async function deleteJournalInteraction(
 // ---------------------------------------------------------------------------
 // Personal Memory Operations (Path: /users/{userId}/memories/{memoryId})
 // ---------------------------------------------------------------------------
-const LOCAL_STORAGE_MEMORIES_PREFIX = 'reflectai_user_memories_';
 
 function getLocalUserMemories(userId: string): UserMemory[] {
   try {
@@ -401,11 +565,15 @@ export async function fetchUserMemories(userId: string): Promise<UserMemory[]> {
 
   const localList = getLocalUserMemories(userId);
 
-  if (db && isFirebaseConfigured) {
+  if (auth) {
+    await auth.authStateReady();
+  }
+
+  // If authenticated with Firebase, read directly from Cloud Firestore
+  if (auth && auth.currentUser && auth.currentUser.uid === userId && db && isFirebaseConfigured) {
     try {
       const collRef = collection(db, 'users', userId, 'memories');
-      const q = query(collRef, orderBy('createdAt', 'desc'));
-      const snapshot = await getDocs(q);
+      const snapshot = await getDocs(collRef);
       const cloudList: UserMemory[] = [];
       snapshot.forEach((d) => {
         cloudList.push(d.data() as UserMemory);
@@ -435,7 +603,8 @@ export async function fetchUserMemories(userId: string): Promise<UserMemory[]> {
  */
 export function subscribeToUserMemories(
   userId: string,
-  onUpdate: (memories: UserMemory[]) => void
+  onUpdate: (memories: UserMemory[]) => void,
+  onError?: (err: any) => void
 ): () => void {
   if (!userId) {
     onUpdate([]);
@@ -443,64 +612,67 @@ export function subscribeToUserMemories(
   }
 
   let active = true;
+  let unsubFirestore: (() => void) | null = null;
 
   // 1. Immediately emit cached memories so memories survive page refresh without flicker
   const initialLocal = getLocalUserMemories(userId);
   onUpdate(initialLocal);
 
-  // 2. Fetch and reconcile cloud documents
-  fetchUserMemories(userId).then((list) => {
-    if (active && list && list.length > 0) {
-      onUpdate(list);
-    }
-  });
+  // 2. Fetch and reconcile cloud documents if authenticated with Firebase
+  if (auth && db && isFirebaseConfigured) {
+    auth.authStateReady().then(() => {
+      if (!active) return;
+      if (!auth.currentUser || auth.currentUser.uid !== userId) {
+        return;
+      }
 
-  // 3. Attach real-time onSnapshot listener
-  if (db && isFirebaseConfigured) {
-    try {
-      const collRef = collection(db, 'users', userId, 'memories');
-      const q = query(collRef, orderBy('createdAt', 'desc'));
-      const unsub = onSnapshot(
-        q,
-        (snapshot) => {
-          if (!active) return;
-          const cloudList: UserMemory[] = [];
-          snapshot.forEach((docSnap) => {
-            cloudList.push(docSnap.data() as UserMemory);
-          });
+      fetchUserMemories(userId).then((list) => {
+        if (active && list && list.length > 0) {
+          onUpdate(list);
+        }
+      }).catch((err) => {
+        console.warn('Initial fetchUserMemories error:', err);
+        if (onError) onError(err);
+      });
 
-          if (cloudList.length > 0) {
-            // Merge cloud documents with local cache
-            const currentLocal = getLocalUserMemories(userId);
-            const mergedMap = new Map<string, UserMemory>();
-            currentLocal.forEach((m) => mergedMap.set(m.id, m));
-            cloudList.forEach((m) => mergedMap.set(m.id, m));
-            const merged = Array.from(mergedMap.values()).sort(
+      // 3. Attach real-time onSnapshot listener
+      try {
+        const collRef = collection(db, 'users', userId, 'memories');
+        unsubFirestore = onSnapshot(
+          collRef,
+          (snapshot) => {
+            if (!active) return;
+            const cloudList: UserMemory[] = [];
+            snapshot.forEach((docSnap) => {
+              cloudList.push(docSnap.data() as UserMemory);
+            });
+            cloudList.sort(
               (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
             );
-            saveLocalUserMemories(userId, merged);
-            onUpdate(merged);
-          } else {
-            // Cloud has 0 documents (e.g. backend sync pending or offline)
-            // DO NOT wipe local cache! Keep local memories alive and emit them
-            const currentLocal = getLocalUserMemories(userId);
-            onUpdate(currentLocal);
+
+            saveLocalUserMemories(userId, cloudList);
+            onUpdate(cloudList);
+          },
+          (error) => {
+            console.error('[Firestore memories listener error on /users/' + userId + '/memories]:', error);
+            if (onError) {
+              onError(error);
+            }
+            if (active) {
+              onUpdate(getLocalUserMemories(userId));
+            }
+            try {
+              handleFirestoreError(error, OperationType.GET, `users/${userId}/memories`);
+            } catch (diagnosticErr) {
+              // Error formatted and logged as FirestoreErrorInfo
+            }
           }
-        },
-        (error) => {
-          console.warn('Firestore memories listener notice, using local cache:', error);
-          if (active) {
-            onUpdate(getLocalUserMemories(userId));
-          }
-        }
-      );
-      return () => {
-        active = false;
-        unsub();
-      };
-    } catch (err) {
-      console.warn('Could not establish Firestore memories subscription:', err);
-    }
+        );
+      } catch (err) {
+        console.error('Could not establish Firestore memories subscription:', err);
+        if (onError) onError(err);
+      }
+    });
   }
 
   // 4. Local storage listener fallback
@@ -512,18 +684,21 @@ export function subscribeToUserMemories(
   window.addEventListener('storage', handler);
   return () => {
     active = false;
+    if (unsubFirestore) {
+      unsubFirestore();
+    }
     window.removeEventListener('storage', handler);
   };
 }
 
 /**
  * Saves a personal memory strictly under /users/{userId}/memories/{memoryId}
- * Validates text length <= 1000 characters and enforces zero-crash payload hygiene.
+ * Validates text length <= 1000 characters, schema compliance, and Firebase Auth session.
  */
 export async function saveUserMemory(
   userId: string,
   memory: UserMemory
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; errorCode?: string }> {
   if (!userId) {
     return { success: false, error: 'User must be authenticated to save memories.' };
   }
@@ -538,48 +713,98 @@ export async function saveUserMemory(
 
   const cleanPayload = stripUndefined(memory);
 
-  // 1. Synchronously persist to durable UID-scoped storage so data is NEVER lost across refreshes
-  const existing = getLocalUserMemories(userId);
-  const filtered = existing.filter((m) => m.id !== cleanPayload.id);
-  const updated = [cleanPayload, ...filtered];
-  saveLocalUserMemories(userId, updated);
+  if (auth) {
+    await auth.authStateReady();
+  }
 
-  // 2. Persist to Cloud Firestore under /users/{userId}/memories/{memoryId} with bounded timeout
+  // Verify Firebase Auth state
+  if (!auth || !auth.currentUser) {
+    // Keep local backup
+    const existing = getLocalUserMemories(userId);
+    const filtered = existing.filter((m) => m.id !== cleanPayload.id);
+    saveLocalUserMemories(userId, [cleanPayload, ...filtered]);
+
+    return {
+      success: false,
+      error: 'Firebase Authentication required: Sign In with Google to persist memories to Cloud Firestore.',
+      errorCode: 'unauthenticated',
+    };
+  }
+
+  if (auth.currentUser.uid !== userId) {
+    return {
+      success: false,
+      error: 'Security Error: Active Firebase UID does not match memory owner.',
+      errorCode: 'permission-denied',
+    };
+  }
+
   if (db && isFirebaseConfigured) {
     try {
       const memoryRef = doc(db, 'users', userId, 'memories', cleanPayload.id);
-      const writePromise = setDoc(memoryRef, cleanPayload, { merge: true });
-      await Promise.race([
-        writePromise,
-        new Promise((resolve) => setTimeout(resolve, 2000)),
-      ]);
+      await setDoc(memoryRef, cleanPayload, { merge: true });
+
+      // Keep local cache in sync
+      const existing = getLocalUserMemories(userId);
+      const filtered = existing.filter((m) => m.id !== cleanPayload.id);
+      saveLocalUserMemories(userId, [cleanPayload, ...filtered]);
+
       return { success: true };
     } catch (err: any) {
-      console.warn('Cloud Firestore memory write deferred or offline, securely preserved in local storage:', err);
+      console.error('[Firestore saveUserMemory error]:', err);
+      const existing = getLocalUserMemories(userId);
+      const filtered = existing.filter((m) => m.id !== cleanPayload.id);
+      saveLocalUserMemories(userId, [cleanPayload, ...filtered]);
+
+      const code = err?.code || 'error';
+      const msg = err?.message || 'Failed to save memory to Cloud Firestore';
+      try {
+        handleFirestoreError(err, OperationType.WRITE, `users/${userId}/memories/${cleanPayload.id}`);
+      } catch {
+        // Logged conforming to FirestoreErrorInfo
+      }
       return {
-        success: true,
+        success: false,
+        error: `Cloud Firestore error (${code}): ${msg}. Ensure firestore.rules are deployed in Firebase Console.`,
+        errorCode: code,
       };
     }
   }
 
-  return { success: true };
+  return {
+    success: false,
+    error: 'Cloud Firestore is not configured or unavailable.',
+    errorCode: 'not-configured',
+  };
 }
 
 /**
- * Updates an existing memory's text or category.
+ * Updates an existing memory's text or category in Firestore.
  * Preserves the full document schema (provenance, confidence, timestamps) for strict rule compliance.
  */
 export async function updateUserMemory(
   userId: string,
   memoryId: string,
   updates: { text?: string; category?: UserMemory['category'] }
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; errorCode?: string }> {
   if (!userId || !memoryId) {
     return { success: false, error: 'User ID and Memory ID are required.' };
   }
 
   if (updates.text && updates.text.length > 1000) {
     return { success: false, error: 'Memory text exceeds maximum length of 1000 characters.' };
+  }
+
+  if (auth) {
+    await auth.authStateReady();
+  }
+
+  if (!auth || !auth.currentUser || auth.currentUser.uid !== userId) {
+    return {
+      success: false,
+      error: 'Firebase Authentication required: Sign In with Google to modify Cloud Firestore memories.',
+      errorCode: 'unauthenticated',
+    };
   }
 
   const existing = getLocalUserMemories(userId);
@@ -600,58 +825,189 @@ export async function updateUserMemory(
 
   const cleanPayload = stripUndefined(fullUpdatedMemory);
 
-  // 1. Immediately persist updated memory in local durable storage
-  const updated = existing.map((m) => (m.id === memoryId ? cleanPayload : m));
-  saveLocalUserMemories(userId, updated);
-
-  // 2. Persist to Cloud Firestore with bounded timeout so UI never hangs or stalls
   if (db && isFirebaseConfigured) {
     try {
       const memoryRef = doc(db, 'users', userId, 'memories', memoryId);
-      const writePromise = setDoc(memoryRef, cleanPayload, { merge: true });
-      await Promise.race([
-        writePromise,
-        new Promise((resolve) => setTimeout(resolve, 2000)),
-      ]);
+      await setDoc(memoryRef, cleanPayload, { merge: true });
+
+      const updated = existing.map((m) => (m.id === memoryId ? cleanPayload : m));
+      saveLocalUserMemories(userId, updated);
+
+      return { success: true };
     } catch (err: any) {
-      console.warn('Firestore memory update notice (preserved in local storage):', err);
+      console.error('[Firestore updateUserMemory error]:', err);
+      const code = err?.code || 'error';
+      const msg = err?.message || 'Database write error';
+      try {
+        handleFirestoreError(err, OperationType.UPDATE, `users/${userId}/memories/${memoryId}`);
+      } catch {
+        // Logged conforming to FirestoreErrorInfo
+      }
+      return {
+        success: false,
+        error: `Firestore error (${code}): ${msg}`,
+        errorCode: code,
+      };
     }
   }
 
-  return { success: true };
+  return { success: false, error: 'Firestore is not configured.' };
 }
 
 /**
- * Deletes a memory from the user's isolated collection.
+ * Deletes a memory from the user's isolated collection in Firestore.
  */
 export async function deleteUserMemory(
   userId: string,
   memoryId: string
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; errorCode?: string }> {
   if (!userId || !memoryId) {
     return { success: false, error: 'Invalid parameters for deletion' };
   }
 
-  // 1. Immediately update durable local storage
-  const existing = getLocalUserMemories(userId);
-  const filtered = existing.filter((m) => m.id !== memoryId);
-  saveLocalUserMemories(userId, filtered);
+  if (auth) {
+    await auth.authStateReady();
+  }
 
-  // 2. Delete from Cloud Firestore with bounded timeout
+  if (!auth || !auth.currentUser || auth.currentUser.uid !== userId) {
+    return {
+      success: false,
+      error: 'Firebase Authentication required: Sign In with Google to delete memories from Cloud Firestore.',
+      errorCode: 'unauthenticated',
+    };
+  }
+
   if (db && isFirebaseConfigured) {
     try {
       const memoryRef = doc(db, 'users', userId, 'memories', memoryId);
-      const delPromise = deleteDoc(memoryRef);
-      await Promise.race([
-        delPromise,
-        new Promise((resolve) => setTimeout(resolve, 2000)),
-      ]);
+      await deleteDoc(memoryRef);
+
+      const existing = getLocalUserMemories(userId);
+      const filtered = existing.filter((m) => m.id !== memoryId);
+      saveLocalUserMemories(userId, filtered);
+
+      return { success: true };
     } catch (err: any) {
-      console.warn('Firestore memory delete notice (removed from local storage):', err);
+      console.error('[Firestore deleteUserMemory error]:', err);
+      const code = err?.code || 'error';
+      const msg = err?.message || 'Failed to delete from Firestore';
+      try {
+        handleFirestoreError(err, OperationType.DELETE, `users/${userId}/memories/${memoryId}`);
+      } catch {
+        // Logged conforming to FirestoreErrorInfo
+      }
+      return {
+        success: false,
+        error: `Firestore error (${code}): ${msg}`,
+        errorCode: code,
+      };
     }
   }
 
-  return { success: true };
+  return { success: false, error: 'Firestore is not configured.' };
+}
+
+/**
+ * Diagnostic utility to verify active Firestore connectivity, authentication, and rules.
+ * Writes a probe document to /users/{userId}/interactions/_connectivity_probe, reads it back, and cleans it up.
+ */
+export async function verifyFirestorePersistence(userId: string): Promise<{
+  success: boolean;
+  message: string;
+  latencyMs?: number;
+  errorCode?: string;
+  details?: Record<string, any>;
+}> {
+  if (!isFirebaseConfigured) {
+    return {
+      success: false,
+      message: 'Firebase configuration is missing in environment variables (VITE_FIREBASE_*).',
+      errorCode: 'missing_config',
+    };
+  }
+
+  if (auth) {
+    await auth.authStateReady();
+  }
+
+  if (!auth || !auth.currentUser) {
+    return {
+      success: false,
+      message: 'User is not signed in to Firebase. Sign in with Google to test Cloud Firestore persistence.',
+      errorCode: 'unauthenticated',
+    };
+  }
+
+  if (auth.currentUser.uid !== userId) {
+    return {
+      success: false,
+      message: 'Client UID mismatch: Authenticated UID does not match test target.',
+      errorCode: 'uid_mismatch',
+    };
+  }
+
+  if (!db) {
+    return {
+      success: false,
+      message: 'Firestore database client is not initialized.',
+      errorCode: 'no_db',
+    };
+  }
+
+  const startTime = Date.now();
+  const probeId = `_probe_${Date.now()}`;
+  const probeRef = doc(db, 'users', userId, 'interactions', probeId);
+  const probeData = {
+    id: probeId,
+    timestamp: new Date().toISOString(),
+    userInput: 'Diagnostic probe testing Firestore connectivity',
+    geminiResponse: 'Connectivity check passed.',
+    perspective: 'First-Person',
+    depth: 'Diagnostic',
+    createdAt: new Date().toISOString(),
+    isProbe: true,
+  };
+
+  try {
+    // 1. Test Write
+    await setDoc(probeRef, probeData);
+
+    // 2. Test Read Back
+    const readBack = await getDoc(probeRef);
+    if (!readBack.exists()) {
+      return {
+        success: false,
+        message: 'Write appeared to succeed, but document was not found on read-back.',
+        errorCode: 'read_back_failed',
+      };
+    }
+
+    // 3. Clean up probe
+    await deleteDoc(probeRef);
+
+    const latencyMs = Date.now() - startTime;
+    return {
+      success: true,
+      message: `Firestore round-trip verified successfully in ${latencyMs}ms at /users/${userId}/interactions/${probeId}.`,
+      latencyMs,
+      details: {
+        projectId: firebaseConfig.projectId,
+        uid: userId,
+        path: `users/${userId}/interactions/${probeId}`,
+      },
+    };
+  } catch (err: any) {
+    console.error('[Firestore Diagnostic Error]:', err);
+    return {
+      success: false,
+      message: `Firestore persistence check failed: [${err?.code || 'error'}] ${err?.message || 'Unknown database error'}.`,
+      errorCode: err?.code || 'error',
+      details: {
+        projectId: firebaseConfig.projectId,
+        uid: userId,
+      },
+    };
+  }
 }
 
 /**
@@ -676,6 +1032,14 @@ export async function askMyJournalAPI(
     createdAt: e.createdAt,
     summary: e.summary,
     keyInsights: e.keyInsights,
+    location: e.location
+      ? {
+          displayName: e.location.displayName,
+          address: e.location.address,
+          latitude: e.location.latitude,
+          longitude: e.location.longitude,
+        }
+      : undefined,
     contentSnippet: (e.messages || [])
       .filter((m) => m.role === 'user')
       .map((m) => m.content)

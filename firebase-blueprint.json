@@ -1,0 +1,57 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile metadata",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" }
+      },
+      "required": ["uid"]
+    },
+    "JournalInteraction": {
+      "title": "JournalInteraction",
+      "description": "A multi-turn reflective journal entry and conversation",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "createdAt"]
+    },
+    "UserMemory": {
+      "title": "UserMemory",
+      "description": "A durable personal memory item extracted from journal reflections",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "text": { "type": "string", "maxLength": 1000 },
+        "category": { "type": "string" },
+        "confidence": { "type": "number" },
+        "provenance": { "type": "string", "enum": ["explicitly_stated", "ai_inferred"] },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "text", "category", "confidence", "provenance", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Root user profile document"
+    },
+    "/users/{userId}/interactions/{interactionId}": {
+      "schema": "JournalInteraction",
+      "description": "Journal interactions and reflections strictly owned by the authenticated user"
+    },
+    "/users/{userId}/memories/{memoryId}": {
+      "schema": "UserMemory",
+      "description": "Personal memories strictly owned by the authenticated user"
+    }
+  }
+}

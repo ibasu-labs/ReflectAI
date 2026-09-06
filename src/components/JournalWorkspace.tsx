@@ -6,6 +6,7 @@ import {
   UserProfile,
   GeminiConverseResponse,
   UserMemory,
+  JournalLocation,
 } from '../types';
 import {
   Sparkles,
@@ -23,10 +24,12 @@ import {
   Clock,
   Trash2,
   Brain,
+  MapPin,
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import { generateId } from '../lib/sanitizer';
 import { getAuthToken, saveUserMemory } from '../lib/firebase';
+import { JournalLocationPicker } from './JournalLocationPicker';
 
 interface JournalWorkspaceProps {
   user: UserProfile;
@@ -209,6 +212,15 @@ export const JournalWorkspace: React.FC<JournalWorkspaceProps> = ({
             mood: currentEntry.mood,
             category: currentEntry.category,
           },
+          location: currentEntry.location
+            ? {
+                placeId: currentEntry.location.placeId,
+                displayName: currentEntry.location.displayName,
+                address: currentEntry.location.address,
+                latitude: currentEntry.location.latitude,
+                longitude: currentEntry.location.longitude,
+              }
+            : undefined,
         }),
       });
 
@@ -551,6 +563,25 @@ export const JournalWorkspace: React.FC<JournalWorkspaceProps> = ({
             </div>
           </div>
 
+          {/* Firestore Save Error Banner */}
+          {saveStatus === 'error' && saveError && (
+            <div className="p-3.5 rounded-xl border bg-rose-950/80 border-rose-800/80 text-rose-200 text-xs flex items-center justify-between gap-3 animate-fade-in shadow-md shadow-black/20">
+              <div className="flex items-start gap-2.5 flex-1">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold text-rose-300">Cloud Firestore Persistence Warning</p>
+                  <p className="text-rose-200/90 leading-relaxed mt-0.5">{saveError}</p>
+                </div>
+              </div>
+              <button
+                onClick={onRetrySave}
+                className="shrink-0 px-3 py-1.5 rounded-lg bg-rose-900/80 hover:bg-rose-800 text-white font-medium transition-colors border border-rose-700/60 cursor-pointer"
+              >
+                Retry Save
+              </button>
+            </div>
+          )}
+
           {/* Memory Feedback Banner with Retry Support */}
           {memoryFeedback && (
             <div
@@ -680,6 +711,15 @@ export const JournalWorkspace: React.FC<JournalWorkspaceProps> = ({
                 />
               </div>
             </div>
+          </div>
+
+          {/* Location-Aware Context (Google Maps Platform) */}
+          <div className="pt-2 border-t border-slate-800/40">
+            <JournalLocationPicker
+              location={currentEntry.location}
+              onChange={(newLoc) => handleUpdateEntry({ location: newLoc })}
+              disabled={isGenerating}
+            />
           </div>
         </div>
 

@@ -245,6 +245,59 @@ async function runTests() {
     assert(false, 'FUNC-04: Insufficient evidence handling', e.message);
   }
 
+  // --- FUNC-04B: Location Grounding & Retrieval ---
+  try {
+    const entryWithLocation = {
+      id: 'entry_career_direction',
+      title: 'Career Direction',
+      createdAt: '2026-08-15T10:00:00.000Z',
+      summary: 'Reflected on AI engineering and technical leadership.',
+      keyInsights: ['Develop AI engineering skills'],
+      location: {
+        placeId: 'place_sf_101',
+        displayName: 'Salesforce Tower, San Francisco, CA',
+        address: '415 Mission St, San Francisco, CA 94105',
+        latitude: 37.7897,
+        longitude: -122.3972,
+      },
+      contentSnippet: "I've realized that I want to spend more time developing my AI engineering skills and eventually move into a technical leadership role.",
+    };
+
+    const res = await fetch(`${BASE_URL}/api/journal/ask`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer test_token_for_career_user',
+        'x-test-mock-gemini': 'true',
+      },
+      body: JSON.stringify({
+        question: 'What location did I associate with my Career Direction entry?',
+        cachedEntries: [entryWithLocation],
+        cachedMemories: [],
+      }),
+    });
+
+    const data = await res.json();
+    const hasLocation =
+      data.answer &&
+      (data.answer.toLowerCase().includes('salesforce tower') ||
+        data.answer.toLowerCase().includes('san francisco'));
+    const citedCareer = data.citations?.some(
+      (c: any) => c.id === 'entry_career_direction' || c.titleOrCategory.includes('Career Direction')
+    );
+
+    assert(
+      res.status === 200 &&
+        data.hasSufficientEvidence === true &&
+        hasLocation &&
+        citedCareer,
+      'FUNC-04B: Question about entry location successfully answers with attached location and citations',
+      `Got answer: ${data.answer?.slice(0, 100)}...`
+    );
+  } catch (e: any) {
+    assert(false, 'FUNC-04B: Location grounding and retrieval', e.message);
+  }
+
   // --- SEC-04: Indirect Prompt Injection Defense ---
   try {
     const maliciousEntry = {

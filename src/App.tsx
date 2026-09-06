@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { UserProfile, JournalInteraction, AuthErrorInfo, UserMemory, MemoryCategory } from './types';
+import { UserProfile, JournalInteraction, AuthErrorInfo, UserMemory, MemoryCategory, AppNavTab } from './types';
 import {
   subscribeToAuth,
   loginWithGoogle,
@@ -12,6 +12,7 @@ import {
   saveUserMemory,
   updateUserMemory,
   deleteUserMemory,
+  verifyFirestorePersistence,
 } from './lib/firebase';
 import { LandingPage } from './components/LandingPage';
 import { Navbar } from './components/Navbar';
@@ -20,8 +21,12 @@ import { HistorySidebar } from './components/HistorySidebar';
 import { SynthesisModal } from './components/SynthesisModal';
 import { ThreatModelModal } from './components/ThreatModelModal';
 import { PersonalMemoriesModal } from './components/PersonalMemoriesModal';
+import { MemoriesView } from './components/MemoriesView';
 import { AskMyJournal } from './components/AskMyJournal';
+import { WhatChanged } from './components/WhatChanged';
+import { SecurityCenter } from './components/SecurityCenter';
 import { generateId } from './lib/sanitizer';
+import { AlertTriangle, CheckCircle2, Database, ExternalLink, X, RefreshCw } from 'lucide-react';
 
 function createNewEntry(userId: string): JournalInteraction {
   return {
@@ -48,10 +53,19 @@ export default function App() {
   const [showThreatModel, setShowThreatModel] = useState(false);
   const [memories, setMemories] = useState<UserMemory[]>([]);
   const [showMemoriesModal, setShowMemoriesModal] = useState(false);
-  const [activeView, setActiveView] = useState<'workspace' | 'ask_journal'>('workspace');
+  const [activeTab, setActiveTab] = useState<AppNavTab>('journal');
 
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error' | 'idle'>('idle');
   const [saveError, setSaveError] = useState<string | undefined>(undefined);
+  const [firestoreError, setFirestoreError] = useState<string | null>(null);
+  const [isDiagnosing, setIsDiagnosing] = useState(false);
+  const [diagnosticResult, setDiagnosticResult] = useState<{
+    success: boolean;
+    message: string;
+    latencyMs?: number;
+    errorCode?: string;
+    details?: Record<string, any>;
+  } | null>(null);
 
   // Subscribe to Auth State
   useEffect(() => {
@@ -68,26 +82,46 @@ export default function App() {
       setInteractions([]);
       setActiveInteraction(null);
       setMemories([]);
+      setFirestoreError(null);
       return;
     }
 
-    const unsubInteractions = subscribeToUserInteractions(user.uid, (data) => {
-      setInteractions(data);
+    const unsubInteractions = subscribeToUserInteractions(
+      user.uid,
+      (data) => {
+        setInteractions(data);
+        // Clear previous listener error on successful read
+        setFirestoreError(null);
 
-      // If no active interaction yet, or active interaction was deleted, select or create
-      setActiveInteraction((prev) => {
-        if (!prev) {
-          return data.length > 0 ? data[0] : createNewEntry(user.uid);
-        }
-        // If current active exists in new list, update it
-        const matched = data.find((d) => d.id === prev.id);
-        return matched || prev;
-      });
-    });
+        // If no active interaction yet, or active interaction was deleted, select or create
+        setActiveInteraction((prev) => {
+          if (!prev) {
+            return data.length > 0 ? data[0] : createNewEntry(user.uid);
+          }
+          // If current active exists in new list, update it
+          const matched = data.find((d) => d.id === prev.id);
+          return matched || prev;
+        });
+      },
+      (err) => {
+        console.error('Firestore interactions listener failed:', err);
+        const code = err?.code || 'error';
+        const msg = err?.message || 'Database read error';
+        setFirestoreError(
+          `Cloud Firestore Read Notice (${code}): ${msg}. Ensure rules in firestore.rules are deployed in Firebase Console.`
+        );
+      }
+    );
 
-    const unsubMemories = subscribeToUserMemories(user.uid, (data) => {
-      setMemories(data);
-    });
+    const unsubMemories = subscribeToUserMemories(
+      user.uid,
+      (data) => {
+        setMemories(data);
+      },
+      (err) => {
+        console.error('Firestore memories listener failed:', err);
+      }
+    );
 
     return () => {
       unsubInteractions();
@@ -145,7 +179,7 @@ export default function App() {
     if (!user) return;
     const newEntry = createNewEntry(user.uid);
     setActiveInteraction(newEntry);
-    setActiveView('workspace');
+    setActiveTab('journal');
     setSaveStatus('idle');
   };
 
@@ -227,12 +261,29 @@ export default function App() {
     return res;
   };
 
+  const handleRunDiagnostic = async () => {
+    if (!user) return;
+    setIsDiagnosing(true);
+    setDiagnosticResult(null);
+    try {
+      const res = await verifyFirestorePersistence(user.uid);
+      setDiagnosticResult(res);
+    } catch (err: any) {
+      setDiagnosticResult({
+        success: false,
+        message: err?.message || 'Failed to execute Firestore connectivity test.',
+      });
+    } finally {
+      setIsDiagnosing(false);
+    }
+  };
+
   if (isAuthLoading) {
     return (
       <div className="min-h-screen bg-[#020617] flex items-center justify-center">
         <div className="text-center space-y-3">
           <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 animate-pulse mx-auto shadow-lg shadow-cyan-950/50" />
-          <p className="font-serif text-sm font-medium text-slate-400">Initializing ReflectAI...</p>
+          <p className="font-serif text-sm font-medium text-slate-400">Initializing Gemini Vault...</p>
         </div>
       </div>
     );
@@ -251,30 +302,115 @@ export default function App() {
   }
 
   const currentWorkspaceEntry = activeInteraction || createNewEntry(user.uid);
+  const isGuestMode = user.isAnonymous || user.uid.startsWith('local_guest_');
 
   return (
     <div className="min-h-screen flex flex-col bg-[#020617] text-slate-200 selection:bg-cyan-500/30 selection:text-cyan-200">
       {/* Navigation */}
       <Navbar
         user={user}
+        activeTab={activeTab}
+        onSelectTab={setActiveTab}
         onSignOut={handleSignOut}
         onNewEntry={handleNewEntry}
         showHistory={showHistory}
         onToggleHistory={() => setShowHistory(!showHistory)}
         onOpenSynthesis={() => setShowSynthesis(true)}
-        onOpenThreatModel={() => setShowThreatModel(true)}
         historyCount={interactions.length}
         memoriesCount={memories.length}
-        onOpenMemories={() => setShowMemoriesModal(true)}
-        activeView={activeView}
-        onToggleAskJournal={() =>
-          setActiveView((prev) => (prev === 'ask_journal' ? 'workspace' : 'ask_journal'))
-        }
+        onRunDiagnostic={handleRunDiagnostic}
+        isDiagnosing={isDiagnosing}
       />
+
+      {/* Guest Mode Informational Banner */}
+      {isGuestMode && (
+        <div className="bg-amber-950/60 border-b border-amber-800/60 px-4 py-2 text-xs flex flex-wrap items-center justify-between gap-2 text-amber-200">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              <strong>Guest Preview Mode:</strong> You are browsing locally. To persist documents to Cloud Firestore, sign in with your Google account.
+            </span>
+          </div>
+          <button
+            onClick={handleSignIn}
+            className="px-2.5 py-1 text-xs font-semibold bg-amber-600 hover:bg-amber-500 text-white rounded-md shadow-xs transition-colors cursor-pointer"
+          >
+            Sign In with Google
+          </button>
+        </div>
+      )}
+
+      {/* Cloud Firestore Read / Permission Error Banner */}
+      {firestoreError && (
+        <div className="bg-rose-950/70 border-b border-rose-800/70 px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-3 text-rose-200">
+          <div className="flex items-start gap-2 max-w-4xl">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <div>
+              <span className="font-semibold text-rose-300">Cloud Firestore Notice: </span>
+              <span className="leading-relaxed">{firestoreError}</span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleRunDiagnostic}
+              disabled={isDiagnosing}
+              className="px-2.5 py-1 text-xs font-medium bg-rose-900/80 hover:bg-rose-800 text-rose-100 rounded-md border border-rose-700/60 transition-colors cursor-pointer"
+            >
+              Run Diagnostic
+            </button>
+            <button
+              onClick={() => setFirestoreError(null)}
+              className="p-1 text-rose-400 hover:text-rose-200 transition-colors cursor-pointer"
+              title="Dismiss warning"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Diagnostic Probe Result Banner */}
+      {diagnosticResult && (
+        <div
+          className={`border-b px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-3 ${
+            diagnosticResult.success
+              ? 'bg-emerald-950/70 border-emerald-800/70 text-emerald-200'
+              : 'bg-rose-950/80 border-rose-800/80 text-rose-200'
+          }`}
+        >
+          <div className="flex items-start gap-2 max-w-4xl">
+            {diagnosticResult.success ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            )}
+            <div>
+              <span className="font-semibold">
+                {diagnosticResult.success
+                  ? 'Firestore Verified: '
+                  : 'Firestore Diagnostic Alert: '}
+              </span>
+              <span>{diagnosticResult.message}</span>
+              {diagnosticResult.details && (
+                <span className="ml-2 font-mono text-[11px] opacity-80">
+                  (Project: {diagnosticResult.details.projectId})
+                </span>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={() => setDiagnosticResult(null)}
+            className="p-1 hover:opacity-80 transition-opacity cursor-pointer"
+            title="Dismiss"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Main Workspace Area */}
       <main className="flex-1 flex overflow-hidden relative">
-        {activeView === 'ask_journal' ? (
+        {activeTab === 'ask_journal' && (
           <div className="flex-1 overflow-y-auto">
             <AskMyJournal
               user={user}
@@ -282,18 +418,71 @@ export default function App() {
               memories={memories}
               onSelectInteraction={(interaction) => {
                 setActiveInteraction(interaction);
-                setActiveView('workspace');
+                setActiveTab('journal');
               }}
               onSelectMemory={() => {
-                setShowMemoriesModal(true);
+                setActiveTab('memories');
               }}
               onNavigateToWorkspace={() => {
-                setActiveView('workspace');
                 handleNewEntry();
               }}
             />
           </div>
-        ) : (
+        )}
+
+        {activeTab === 'memories' && (
+          <div className="flex-1 overflow-y-auto">
+            <MemoriesView
+              user={user}
+              memories={memories}
+              interactions={interactions}
+              onSaveMemory={handleSaveMemory}
+              onUpdateMemory={handleUpdateMemory}
+              onDeleteMemory={handleDeleteMemory}
+              onNavigateToWorkspace={() => setActiveTab('journal')}
+            />
+          </div>
+        )}
+
+        {activeTab === 'what_changed' && (
+          <div className="flex-1 overflow-y-auto">
+            <WhatChanged
+              user={user}
+              interactions={interactions}
+              memories={memories}
+              onOpenEntry={(id) => {
+                const found = interactions.find((i) => i.id === id);
+                if (found) {
+                  setActiveInteraction(found);
+                  setActiveTab('journal');
+                }
+              }}
+              onSelectThoughtStarter={(prompt) => {
+                if (!user) return;
+                const newEntry = createNewEntry(user.uid);
+                newEntry.messages = [
+                  {
+                    id: generateId('msg'),
+                    role: 'user',
+                    content: prompt,
+                    timestamp: new Date().toISOString(),
+                  },
+                ];
+                newEntry.title = prompt.length > 40 ? `${prompt.slice(0, 37)}...` : prompt;
+                setActiveInteraction(newEntry);
+                setActiveTab('journal');
+              }}
+            />
+          </div>
+        )}
+
+        {activeTab === 'security' && (
+          <div className="flex-1 overflow-y-auto">
+            <SecurityCenter user={user} />
+          </div>
+        )}
+
+        {activeTab === 'journal' && (
           <JournalWorkspace
             key={currentWorkspaceEntry.id}
             user={user}
@@ -303,7 +492,7 @@ export default function App() {
             saveStatus={saveStatus}
             saveError={saveError}
             onRetrySave={handleRetrySave}
-            onOpenMemoriesModal={() => setShowMemoriesModal(true)}
+            onOpenMemoriesModal={() => setActiveTab('memories')}
             onMemorySaved={(newMemory) =>
               setMemories((prev) => [newMemory, ...prev.filter((m) => m.id !== newMemory.id)])
             }
@@ -318,7 +507,7 @@ export default function App() {
           activeId={currentWorkspaceEntry.id}
           onSelectInteraction={(item) => {
             setActiveInteraction(item);
-            setActiveView('workspace');
+            setActiveTab('journal');
           }}
           onDeleteInteraction={handleDeleteInteraction}
         />

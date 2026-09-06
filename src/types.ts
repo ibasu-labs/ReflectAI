@@ -8,6 +8,14 @@ export interface Message {
 
 export type ReflectionMode = 'reflect' | 'summarize' | 'brainstorm' | 'action_plan' | 'gratitude';
 
+export interface JournalLocation {
+  placeId?: string;
+  displayName: string;
+  address?: string;
+  latitude: number;
+  longitude: number;
+}
+
 export interface JournalInteraction {
   id: string;
   userId: string;
@@ -19,6 +27,7 @@ export interface JournalInteraction {
   summary?: string;
   keyInsights?: string[];
   actionItems?: string[];
+  location?: JournalLocation;
   mood?: 'energized' | 'calm' | 'thoughtful' | 'challenging' | 'grateful';
   createdAt: string;
   updatedAt: string;
@@ -160,4 +169,57 @@ export interface AskJournalSessionTurn {
   citations: AskJournalCitation[];
   timestamp: string;
   modelUsed?: string;
+}
+
+export type ChangeDimension = 'goals' | 'priorities' | 'habits' | 'values' | 'decisions' | 'themes';
+
+export interface ObservedChangeItem {
+  category: ChangeDimension;
+  title: string;
+  observedChange: string;
+  earlierEvidence: {
+    date?: string;
+    quote: string;
+    sourceId?: string;
+    sourceTitle?: string;
+  };
+  recentEvidence: {
+    date?: string;
+    quote: string;
+    sourceId?: string;
+    sourceTitle?: string;
+  };
+  confidence: number;
+}
+
+export interface WhatChangedRequest {
+  timeframe?: 'all' | '30d' | '90d' | 'year';
+  categoryFocus?: ChangeDimension | 'all';
+}
+
+export interface WhatChangedResponse {
+  overview: string;
+  timeRange: {
+    earliestDate?: string;
+    latestDate?: string;
+    totalEntriesAnalyzed: number;
+  };
+  changes: ObservedChangeItem[];
+  continuity: string[];
+  growthQuestions: string[];
+  modelUsed: string;
+}
+
+export type AppNavTab = 'journal' | 'memories' | 'ask_journal' | 'what_changed' | 'security';
+
+export interface SecurityTestCase {
+  id: string;
+  code: string; // e.g. 'SEC-01'
+  title: string;
+  description: string;
+  category: 'auth' | 'isolation' | 'injection' | 'integrity' | 'secrets' | 'location';
+  expectedOutcome: string;
+  status: 'passed' | 'failed' | 'pending' | 'running';
+  resultDetails?: string;
+  executedAt?: string;
 }
