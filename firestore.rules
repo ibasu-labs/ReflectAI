@@ -10,5 +10,23 @@ service cloud.firestore {
     match /users/{userId}/interactions/{interactionId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
+
+    // Personal Memories - Strictly owned by authenticated user via path isolation
+    match /users/{userId}/memories/{memoryId} {
+      // Owner read and delete
+      allow read, delete: if request.auth != null && request.auth.uid == userId;
+
+      // Owner create and update with strict schema and max length 1000 validation
+      allow create, update: if request.auth != null 
+                            && request.auth.uid == userId
+                            && request.resource.data.text is string
+                            && request.resource.data.text.size() > 0
+                            && request.resource.data.text.size() <= 1000
+                            && request.resource.data.category is string
+                            && request.resource.data.confidence is number
+                            && request.resource.data.confidence >= 0
+                            && request.resource.data.confidence <= 1
+                            && request.resource.data.provenance in ['explicitly_stated', 'ai_inferred'];
+    }
   }
 }

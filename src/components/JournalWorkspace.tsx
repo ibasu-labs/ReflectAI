@@ -5,6 +5,7 @@ import {
   ReflectionMode,
   UserProfile,
   GeminiConverseResponse,
+  UserMemory,
 } from '../types';
 import {
   Sparkles,
@@ -21,9 +22,11 @@ import {
   AlertCircle,
   Clock,
   Trash2,
+  Brain,
 } from 'lucide-react';
 import Markdown from 'react-markdown';
 import { generateId } from '../lib/sanitizer';
+import { getAuthToken, saveUserMemory } from '../lib/firebase';
 
 interface JournalWorkspaceProps {
   user: UserProfile;
@@ -33,6 +36,8 @@ interface JournalWorkspaceProps {
   saveStatus: 'saved' | 'saving' | 'error' | 'idle';
   saveError?: string;
   onRetrySave: () => void;
+  onOpenMemoriesModal?: () => void;
+  onMemorySaved?: (memory: UserMemory) => void;
 }
 
 const MODES: { id: ReflectionMode; label: string; icon: any; desc: string; color: string }[] = [
@@ -117,6 +122,8 @@ export const JournalWorkspace: React.FC<JournalWorkspaceProps> = ({
   saveStatus,
   saveError,
   onRetrySave,
+  onOpenMemoriesModal,
+  onMemorySaved,
 }) => {
   const [currentEntry, setCurrentEntry] = useState<JournalInteraction>(activeInteraction);
   const [inputPrompt, setInputPrompt] = useState('');
@@ -124,12 +131,21 @@ export const JournalWorkspace: React.FC<JournalWorkspaceProps> = ({
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [lastModelUsed, setLastModelUsed] = useState<string | null>(null);
   const [newTagInput, setNewTagInput] = useState('');
+  const [memoryExtractionStage, setMemoryExtractionStage] = useState<'idle' | 'extracting' | 'saving'>('idle');
+  const [pendingMemoryToSave, setPendingMemoryToSave] = useState<UserMemory | null>(null);
+  const [memoryFeedback, setMemoryFeedback] = useState<{
+    type: 'success' | 'info' | 'error';
+    message: string;
+    isRetryable?: boolean;
+    retryStage?: 'extract' | 'save';
+  } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Sync state when parent active interaction changes
   useEffect(() => {
     setCurrentEntry(activeInteraction);
     setGenerationError(null);
+    setMemoryFeedback(null);
   }, [activeInteraction.id]);
 
   // Scroll to bottom of message list on new messages
@@ -270,6 +286,190 @@ export const JournalWorkspace: React.FC<JournalWorkspaceProps> = ({
     handleUpdateEntry({ actionItems: updated });
   };
 
+  const handleExtractPersonalMemory = async () => {
+    const allContent = currentEntry.messages
+      .map((m) => `${m.role === 'user' ? 'User Reflection' : 'Assistant'}: ${m.content}`)
+      .join('\n\n');
+
+    if (!allContent.trim()) {
+      setMemoryFeedback({
+        type: 'info',
+        message: 'Write a reflection or chat with the assistant first before extracting personal memories.',
+      });
+      return;
+    }
+
+    setMemoryFeedback(null);
+    setPendingMemoryToSave(null);
+
+    // =========================================================================
+    // STAGE 1: Gemini Generation & Validation
+    // =========================================================================
+    setMemoryExtractionStage('extracting');
+
+    let validMemory: UserMemory | null = null;
+    try {
+      const token = await getAuthToken();
+      if (!token) {
+        setMemoryFeedback({
+          type: 'error',
+          message: 'Firebase sign-in required. Please sign in to extract personal memories to your cloud account.',
+        });
+        setMemoryExtractionStage('idle');
+        return;
+      }
+
+      const res = await fetch('/api/memories/extract', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          entryId: currentEntry.id,
+          content: allContent,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        const rawErrMsg = errData.error || `Server responded with status ${res.status}`;
+        if (
+          res.status === 429 ||
+          rawErrMsg.toLowerCase().includes('quota') ||
+          rawErrMsg.toLowerCase().includes('credit') ||
+          rawErrMsg.toLowerCase().includes('depleted') ||
+          rawErrMsg.toLowerCase().includes('exhausted')
+        ) {
+          throw new Error(
+            'AI memory extraction is temporarily unavailable because the Gemini API quota or credits are exhausted. Your journal entry is safe. Please restore Gemini API access and try again.'
+          );
+        }
+        throw new Error(rawErrMsg);
+      }
+
+      const data = await res.json();
+      if (!data.found || !data.memory || !data.memory.text || typeof data.memory.text !== 'string') {
+        setMemoryExtractionStage('idle');
+        setMemoryFeedback({
+          type: 'info',
+          message: data.message || 'No durable personal memory identified in this entry.',
+        });
+        return;
+      }
+
+      validMemory = data.memory;
+    } catch (stage1Err: any) {
+      console.warn('[Personal Memory Stage 1 Failed]', stage1Err?.message);
+      setMemoryExtractionStage('idle');
+      setMemoryFeedback({
+        type: 'error',
+        message:
+          stage1Err?.message ||
+          'Failed to extract personal memory with Gemini. Your journal entry is safe.',
+        isRetryable: true,
+        retryStage: 'extract',
+      });
+      // CRITICAL: Fail closed. Never enter Stage 2 or touch Firestore on Stage 1 failure!
+      return;
+    }
+
+    // =========================================================================
+    // STAGE 2: Firestore Persistence
+    // (Only reached after successful Stage 1 Gemini generation and validation)
+    // =========================================================================
+    setMemoryExtractionStage('saving');
+    setPendingMemoryToSave(validMemory);
+
+    try {
+      const saveResult = await saveUserMemory(user.uid, validMemory);
+      if (saveResult && !saveResult.success) {
+        throw new Error(saveResult.error || 'Failed to save memory to Firestore.');
+      }
+
+      if (onMemorySaved) {
+        onMemorySaved(validMemory);
+      }
+      setPendingMemoryToSave(null);
+      setMemoryFeedback({
+        type: 'success',
+        message: `Personal Memory extracted and saved! [${validMemory.category.toUpperCase()}]: "${validMemory.text.slice(0, 80)}${validMemory.text.length > 80 ? '...' : ''}"`,
+      });
+    } catch (stage2Err: any) {
+      console.error('[Personal Memory Stage 2 Failed]', stage2Err);
+      setMemoryFeedback({
+        type: 'error',
+        message:
+          'Personal memory was successfully extracted by Gemini, but saving to Firestore failed. Your journal entry and memory are safe. Please retry saving.',
+        isRetryable: true,
+        retryStage: 'save',
+      });
+    } finally {
+      setMemoryExtractionStage('idle');
+    }
+  };
+
+  const handleRetryStage2Save = async () => {
+    if (!pendingMemoryToSave || !user) return;
+    setMemoryExtractionStage('saving');
+    try {
+      const saveResult = await saveUserMemory(user.uid, pendingMemoryToSave);
+      if (saveResult && !saveResult.success) {
+        throw new Error(saveResult.error || 'Firestore write failed');
+      }
+      if (onMemorySaved) {
+        onMemorySaved(pendingMemoryToSave);
+      }
+      const saved = pendingMemoryToSave;
+      setPendingMemoryToSave(null);
+      setMemoryFeedback({
+        type: 'success',
+        message: `Personal Memory saved to Firestore! [${saved.category.toUpperCase()}]: "${saved.text.slice(0, 80)}${saved.text.length > 80 ? '...' : ''}"`,
+      });
+    } catch (err: any) {
+      setMemoryFeedback({
+        type: 'error',
+        message: 'Retry save to Firestore failed. Please check your connection and try again.',
+        isRetryable: true,
+        retryStage: 'save',
+      });
+    } finally {
+      setMemoryExtractionStage('idle');
+    }
+  };
+
+  const handleSaveInsightAsMemory = async (insightText: string) => {
+    if (!insightText.trim()) return;
+    const cleanText = insightText.trim().slice(0, 1000);
+    const newMemory: UserMemory = {
+      id: generateId('mem'),
+      text: cleanText,
+      category: 'insight',
+      sourceRef: {
+        entryId: currentEntry.id,
+        origin: 'journal_entry',
+      },
+      confidence: 1.0,
+      provenance: 'explicitly_stated',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const res = await saveUserMemory(user.uid, newMemory);
+    if (res.success) {
+      if (onMemorySaved) onMemorySaved(newMemory);
+      setMemoryFeedback({
+        type: 'success',
+        message: 'Insight saved directly to your Personal Memories!',
+      });
+    } else {
+      setMemoryFeedback({
+        type: 'error',
+        message: res.error || 'Failed to save memory.',
+      });
+    }
+  };
+
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-[#020617] text-slate-200 overflow-y-auto">
       <div className="max-w-4xl w-full mx-auto px-4 sm:px-6 py-6 space-y-6">
@@ -287,31 +487,118 @@ export const JournalWorkspace: React.FC<JournalWorkspaceProps> = ({
             />
 
             {/* Save Status & Persistence Feedback */}
-            <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+            <div className="flex items-center gap-2 self-end sm:self-auto shrink-0 flex-wrap">
+              {/* Extract Personal Memory Button with explicit two-stage progression */}
+              <button
+                id="btn-extract-memory"
+                onClick={handleExtractPersonalMemory}
+                disabled={memoryExtractionStage !== 'idle' || currentEntry.messages.length === 0}
+                className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold text-cyan-300 bg-cyan-950/80 hover:bg-cyan-900/80 border border-cyan-700/60 rounded-lg shadow-sm transition-all disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                title="Extract durable personal values, goals, or insights using Gemini via Cloud Run backend"
+              >
+                {memoryExtractionStage === 'extracting' ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+                    <span>Extracting with Gemini...</span>
+                  </>
+                ) : memoryExtractionStage === 'saving' ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                    <span>Saving to Firestore...</span>
+                  </>
+                ) : (
+                  <>
+                    <Brain className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Extract Memory</span>
+                  </>
+                )}
+              </button>
+
+              {onOpenMemoriesModal && (
+                <button
+                  id="btn-workspace-open-memories"
+                  onClick={onOpenMemoriesModal}
+                  className="p-1.5 text-slate-400 hover:text-cyan-300 hover:bg-slate-800 rounded-lg border border-slate-800 transition-colors cursor-pointer"
+                  title="View and manage all Personal Memories"
+                >
+                  <Brain className="w-4 h-4" />
+                </button>
+              )}
+
+              {/* Journal Entry Auto-Save Status Indicator */}
               {saveStatus === 'saving' && (
                 <span className="inline-flex items-center gap-1.5 text-xs text-amber-300 font-medium px-2.5 py-1 rounded-full bg-amber-950/60 border border-amber-800/60 shadow-xs">
                   <RefreshCw className="w-3 h-3 animate-spin text-amber-400" />
-                  <span>Saving to Firestore...</span>
+                  <span>Saving entry...</span>
                 </span>
               )}
               {saveStatus === 'saved' && (
                 <span className="inline-flex items-center gap-1.5 text-xs text-emerald-300 font-medium px-2.5 py-1 rounded-full bg-emerald-950/60 border border-emerald-800/60 shadow-xs">
                   <Check className="w-3 h-3 text-emerald-400" />
-                  <span>Saved in User Storage</span>
+                  <span>Entry saved</span>
                 </span>
               )}
               {saveStatus === 'error' && (
                 <button
                   onClick={onRetrySave}
                   className="inline-flex items-center gap-1.5 text-xs text-rose-300 hover:text-rose-200 font-medium px-2.5 py-1 rounded-full bg-rose-950/60 border border-rose-800/60 hover:bg-rose-900/60 transition-colors cursor-pointer"
-                  title={saveError || 'Retry Save'}
+                  title={saveError || 'Retry Save Entry'}
                 >
                   <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
-                  <span>Retry Save</span>
+                  <span>Retry Save Entry</span>
                 </button>
               )}
             </div>
           </div>
+
+          {/* Memory Feedback Banner with Retry Support */}
+          {memoryFeedback && (
+            <div
+              className={`p-3.5 rounded-xl border text-xs flex items-center justify-between gap-3 animate-fade-in ${
+                memoryFeedback.type === 'success'
+                  ? 'bg-emerald-950/70 border-emerald-800/70 text-emerald-200'
+                  : memoryFeedback.type === 'error'
+                  ? 'bg-rose-950/80 border-rose-800/80 text-rose-200'
+                  : 'bg-cyan-950/70 border-cyan-800/70 text-cyan-200'
+              }`}
+            >
+              <div className="flex items-start gap-2 flex-1">
+                {memoryFeedback.type === 'success' && <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />}
+                {memoryFeedback.type === 'error' && <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />}
+                {memoryFeedback.type === 'info' && <Brain className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />}
+                <span className="leading-relaxed">{memoryFeedback.message}</span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {memoryFeedback.isRetryable && memoryFeedback.retryStage === 'extract' && (
+                  <button
+                    id="btn-retry-memory-extract"
+                    onClick={handleExtractPersonalMemory}
+                    disabled={memoryExtractionStage === 'extracting'}
+                    className="px-2.5 py-1 text-xs font-semibold rounded-md bg-rose-900/90 hover:bg-rose-800 text-rose-100 border border-rose-700/80 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    Retry Extraction
+                  </button>
+                )}
+                {memoryFeedback.isRetryable && memoryFeedback.retryStage === 'save' && (
+                  <button
+                    id="btn-retry-memory-save"
+                    onClick={handleRetryStage2Save}
+                    disabled={memoryExtractionStage === 'saving'}
+                    className="px-2.5 py-1 text-xs font-semibold rounded-md bg-amber-900/90 hover:bg-amber-800 text-amber-100 border border-amber-700/80 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    Retry Save
+                  </button>
+                )}
+                <button
+                  onClick={() => setMemoryFeedback(null)}
+                  className="text-xs opacity-70 hover:opacity-100 font-bold px-1.5 py-0.5 rounded hover:bg-white/10 cursor-pointer"
+                  title="Dismiss notification"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Mode Tabs */}
           <div className="space-y-2">
@@ -408,9 +695,18 @@ export const JournalWorkspace: React.FC<JournalWorkspaceProps> = ({
                 </div>
                 <ul className="space-y-1.5 text-xs sm:text-sm text-slate-200">
                   {currentEntry.keyInsights.map((insight, idx) => (
-                    <li key={idx} className="flex items-start gap-2">
-                      <span className="text-cyan-400 font-bold">•</span>
-                      <span>{insight}</span>
+                    <li key={idx} className="flex items-start justify-between gap-2 group">
+                      <div className="flex items-start gap-2">
+                        <span className="text-cyan-400 font-bold">•</span>
+                        <span>{insight}</span>
+                      </div>
+                      <button
+                        onClick={() => handleSaveInsightAsMemory(insight)}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-cyan-300 hover:text-cyan-200 px-1.5 py-0.5 rounded-sm bg-cyan-950/80 border border-cyan-800/60 shrink-0 cursor-pointer"
+                        title="Save as an explicitly stated personal memory"
+                      >
+                        + Save Memory
+                      </button>
                     </li>
                   ))}
                 </ul>

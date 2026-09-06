@@ -1,6 +1,6 @@
 import React from 'react';
 import { UserProfile } from '../types';
-import { LogOut, Plus, History, Sparkles, ShieldCheck, User } from 'lucide-react';
+import { LogOut, Plus, History, Sparkles, ShieldCheck, User, Brain, MessageSquareQuote } from 'lucide-react';
 
 interface NavbarProps {
   user: UserProfile;
@@ -11,6 +11,10 @@ interface NavbarProps {
   onOpenSynthesis: () => void;
   onOpenThreatModel: () => void;
   historyCount: number;
+  memoriesCount: number;
+  onOpenMemories: () => void;
+  activeView: 'workspace' | 'ask_journal';
+  onToggleAskJournal: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -22,6 +26,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenSynthesis,
   onOpenThreatModel,
   historyCount,
+  memoriesCount,
+  onOpenMemories,
+  activeView,
+  onToggleAskJournal,
 }) => {
   return (
     <header className="border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-md sticky top-0 z-20 shadow-lg shadow-black/20">
@@ -76,6 +84,35 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span className="text-xs px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-300 font-semibold border border-slate-700">
               {historyCount}
             </span>
+          </button>
+
+          {/* Personal Memories Toggle */}
+          <button
+            id="btn-open-memories"
+            onClick={onOpenMemories}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg border bg-slate-900/80 border-slate-800 text-slate-300 hover:bg-slate-800 hover:border-slate-700 hover:text-cyan-300 transition-all cursor-pointer"
+            title="Personal Memories - enduring values, habits, and goals"
+          >
+            <Brain className="w-4 h-4 text-cyan-400" />
+            <span className="hidden md:inline">Memories</span>
+            <span className="text-xs px-1.5 py-0.2 rounded-full bg-slate-800 text-cyan-300 font-semibold border border-slate-700">
+              {memoriesCount}
+            </span>
+          </button>
+
+          {/* Ask My Journal Toggle */}
+          <button
+            id="btn-nav-ask-journal"
+            onClick={onToggleAskJournal}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg border transition-all cursor-pointer ${
+              activeView === 'ask_journal'
+                ? 'bg-gradient-to-r from-cyan-950/90 to-blue-950/90 border-cyan-500/60 text-cyan-300 shadow-sm shadow-cyan-950/50'
+                : 'bg-slate-900/80 border-slate-800 text-slate-300 hover:bg-slate-800 hover:border-slate-700 hover:text-cyan-300'
+            }`}
+            title="Ask My Journal - Grounded natural-language inquiry"
+          >
+            <MessageSquareQuote className="w-4 h-4 text-cyan-400" />
+            <span className="hidden md:inline">Ask Journal</span>
           </button>
 
           {/* Synthesize All Modal */}
